@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import AdBanner from "./components/AdBanner";
 import "./App.css";
 
 // ── date helpers ──────────────────────────────────────────────────────────────
@@ -560,6 +561,9 @@ export default function App() {
 
       {/* Toast */}
       <div className={`toast${toast.show ? " show" : ""}`}>{toast.msg}</div>
+        <div className="footer-ad">
+          <AdBanner />
+        </div>
     </div>
   );
 }
