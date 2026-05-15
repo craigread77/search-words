@@ -15,18 +15,21 @@ export async function onRequest(context) {
       `SELECT streak, last_completed FROM users WHERE token = ?`
     ).bind(token).first();
 
-    // Fetch all completed puzzle dates for this user
+    // Fetch all puzzle progress for this user
     const { results: puzzleRows } = await env.DB.prepare(
-      `SELECT date, found_words FROM puzzles WHERE token = ?`
+      `SELECT date, found_words, complete FROM puzzles WHERE token = ?`
     ).bind(token).all();
 
-    // Build a map of { "2026-05-03": ["WORD1", ...], ... }
+    // Build a map of { "2026-05-03": { found: ["WORD1", ...], complete: true } }
     const puzzles = {};
     for (const row of puzzleRows) {
       try {
-        puzzles[row.date] = JSON.parse(row.found_words);
+        puzzles[row.date] = {
+          found:    JSON.parse(row.found_words),
+          complete: row.complete === 1,
+        };
       } catch {
-        puzzles[row.date] = [];
+        puzzles[row.date] = { found: [], complete: false };
       }
     }
 

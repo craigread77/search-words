@@ -244,16 +244,13 @@ export default function App() {
         setStreak(best.streak);
 
         // ── 3. Puzzle progress — merge DB rows into localStorage ──────────────
-        // DB is authoritative for any date where it has more found words.
         const dbPuzzles = dbData.puzzles || {};
-        for (const [date, dbFound] of Object.entries(dbPuzzles)) {
-          const localProg = loadProgress(date);
+        for (const [date, dbProg] of Object.entries(dbPuzzles)) {
+          const localProg  = loadProgress(date);
           const localFound = localProg.found || [];
-          // Use whichever has more found words
+          const dbFound    = dbProg.found    || [];
           if (dbFound.length > localFound.length) {
-            const isComplete = dbFound.length > 0 &&
-              (dbPuzzles[date]?.complete ?? localProg.complete);
-            saveProgress(date, new Set(dbFound), isComplete);
+            saveProgress(date, new Set(dbFound), dbProg.complete);
           }
         }
       } else {
@@ -512,11 +509,12 @@ export default function App() {
       const syncData = await syncRes.json();
       if (syncData.success) {
         const dbPuzzles = syncData.puzzles || {};
-        for (const [date, dbFound] of Object.entries(dbPuzzles)) {
+        for (const [date, dbProg] of Object.entries(dbPuzzles)) {
           const localProg  = loadProgress(date);
           const localFound = localProg.found || [];
+          const dbFound    = dbProg.found    || [];
           if (dbFound.length > localFound.length) {
-            saveProgress(date, new Set(dbFound), dbFound.complete ?? localProg.complete);
+            saveProgress(date, new Set(dbFound), dbProg.complete);
           }
         }
       }
