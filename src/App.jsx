@@ -697,9 +697,9 @@ export default function App() {
                 <h2>Solved!</h2>
                 <p>You found all {puzzle.words.length} words in this puzzle.</p>
                 <div className="solved-actions">
-                  <button className="overlay-btn overlay-btn--ghost" onClick={handleReplay}>
+                  {/* <button className="overlay-btn overlay-btn--ghost" onClick={handleReplay}>
                     ↺ Replay
-                  </button>
+                  </button> */}
                   {canGoBack && (
                     <button className="overlay-btn" onClick={() => go(-1)}>
                       ← Previous
