@@ -13,6 +13,14 @@
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
+	],
+	"d1_databases": [
+		{
+			"binding": "searchwords_db",
+			"database_name": "searchwords-db",
+			"database_id": "7ed0bcee-9159-413c-ae12-80053b26b8a8",
+			"remote": true
+		}
 	]
 	/**
 	 * Smart Placement

@@ -32,7 +32,7 @@ function fmtDate(d) {
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-// ── localStorage progress helpers ─────────────────────────────────────────────
+// ── localStorage helpers (used as fast local cache while DB syncs) ────────────
 const STORAGE_PREFIX = "wordsearch:";
 
 function loadProgress(iso) {
@@ -50,7 +50,6 @@ function saveProgress(iso, foundSet, complete) {
     localStorage.setItem(
       STORAGE_PREFIX + iso,
       JSON.stringify({ found: [...foundSet], complete })
-      
     );
   } catch {}
 }
@@ -59,30 +58,58 @@ function clearProgress(iso) {
   try { localStorage.removeItem(STORAGE_PREFIX + iso); } catch {}
 }
 
-// -- streak helpers -----
+// ── token helpers ─────────────────────────────────────────────────────────────
 const STREAK_KEY = "wordsearch:streak";
+const TOKEN_KEY  = "wordsearch:userToken";
+
+function getUserToken() {
+  let token = localStorage.getItem(TOKEN_KEY);
+  if (!token) {
+    token = crypto.randomUUID();
+    localStorage.setItem(TOKEN_KEY, token);
+  }
+  return token;
+}
 
 function loadStreak() {
   try {
-    return JSON.parse(localStorage.getItem(STREAK_KEY)) || {
-      lastCompleted: null,
-      streak: 0,
-    };
+    return JSON.parse(localStorage.getItem(STREAK_KEY)) || { lastCompleted: null, streak: 0 };
   } catch {
     return { lastCompleted: null, streak: 0 };
   }
 }
 
 function saveStreak(data) {
-  try {
-    localStorage.setItem(STREAK_KEY, JSON.stringify(data));
-  } catch {}
+  try { localStorage.setItem(STREAK_KEY, JSON.stringify(data)); } catch {}
 }
 
 function isYesterday(todayISO, lastISO) {
   const d = fromISO(lastISO);
   d.setDate(d.getDate() + 1);
   return toISO(d) === todayISO;
+}
+
+// ── DB API helpers ────────────────────────────────────────────────────────────
+// Push puzzle progress to the DB (fire-and-forget, local cache is source of truth for UX)
+function pushPuzzleProgress(token, iso, foundSet, complete) {
+  fetch("/api/streak", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      token,
+      date:       iso,
+      foundWords: [...foundSet],
+      complete,
+    }),
+  }).catch(() => {}); // silent — local cache keeps things working offline
+}
+
+function pushStreak(token, streak, lastCompleted) {
+  fetch("/api/streak", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, streak, lastCompleted }),
+  }).catch(() => {});
 }
 
 // ── word-search logic ──────────────────────────────────────────────────────────
@@ -153,47 +180,61 @@ export default function App() {
   const foundCellMap  = useRef(new Map());
   const gridPanelRef  = useRef(null);
 
-  // ── load manifest once on mount ──────────────────────────────────────────────
+  // ── init: token, manifest, DB sync — all in one effect ───────────────────────
   useEffect(() => {
-    fetch("/puzzles/manifest.json")
-      .then((r) => r.json())
-      .then((allDates) => {
-        const todayISO = toISO(today());
-        // Only include dates that exist and are not in the future
-        const past = allDates.filter((d) => d <= todayISO).sort();
-        setAvailableDates(past);
-        // Jump activeDate to today if available, else the most recent date
-        if (past.length > 0) {
-          const best = past.includes(todayISO) ? todayISO : past[past.length - 1];
-          setActiveDate(fromISO(best));
-        }
-      })
-      .catch(() => {
-        // Fallback: no manifest, only today
-        setAvailableDates([toISO(today())]);
-      });
-  }, []);
+    const token = getUserToken(); // creates token in localStorage if missing
 
-  // load streak on mount ----
-  useEffect(() => {
-    const data = loadStreak();
-
-    if (data.lastCompleted) {
+    // Run manifest fetch and DB fetch in parallel
+    Promise.all([
+      fetch("/puzzles/manifest.json").then((r) => r.json()),
+      fetch(`/api/streak?token=${token}`).then((r) => r.json()).catch(() => null),
+    ]).then(([allDates, dbData]) => {
+      // ── 1. Manifest → available dates ──────────────────────────────────────
       const todayISO = toISO(today());
+      const past = allDates.filter((d) => d <= todayISO).sort();
+      setAvailableDates(past);
 
-      // If last completion is NOT today or yesterday → reset
-      const isSameDay = data.lastCompleted === todayISO;
-      const wasYesterday = isYesterday(todayISO, data.lastCompleted);
+      // ── 2. Streak — take whichever is higher: local or DB ──────────────────
+      const local = loadStreak();
+      if (dbData?.success) {
+        const dbStreak   = dbData.streak        || 0;
+        const dbLast     = dbData.lastCompleted  || null;
+        const localStreak = local.streak         || 0;
 
-      if (!isSameDay && !wasYesterday) {
-        const reset = { lastCompleted: null, streak: 0 };
-        saveStreak(reset);
-        setStreak(0);
-        return;
+        let best;
+        if (dbStreak >= localStreak) {
+          best = { streak: dbStreak, lastCompleted: dbLast };
+        } else {
+          best = { streak: localStreak, lastCompleted: local.lastCompleted };
+          // write the higher local value back to DB
+          pushStreak(token, localStreak, local.lastCompleted);
+        }
+        saveStreak(best);
+        setStreak(best.streak);
+
+        // ── 3. Puzzle progress — merge DB rows into localStorage ──────────────
+        // DB is authoritative for any date where it has more found words.
+        const dbPuzzles = dbData.puzzles || {};
+        for (const [date, dbFound] of Object.entries(dbPuzzles)) {
+          const localProg = loadProgress(date);
+          const localFound = localProg.found || [];
+          // Use whichever has more found words
+          if (dbFound.length > localFound.length) {
+            const isComplete = dbFound.length > 0 &&
+              (dbPuzzles[date]?.complete ?? localProg.complete);
+            saveProgress(date, new Set(dbFound), isComplete);
+          }
+        }
+      } else {
+        // DB unavailable — fall back to local streak
+        setStreak(local.streak || 0);
       }
-    }
-
-    setStreak(data.streak);
+    }).catch(() => {
+      // Entire init failed — fall back gracefully
+      setAvailableDates([toISO(today())]);
+      const local = loadStreak();
+      setStreak(local.streak || 0);
+    });
   }, []);
 
   // ── load puzzle + restore progress ──────────────────────────────────────────
@@ -287,6 +328,8 @@ export default function App() {
 
       const isFinished = updated.size === puz.words.length;
       saveProgress(toISO(activeDate), updated, isFinished);
+      // Push progress to DB on every word found (so switching devices is seamless)
+      pushPuzzleProgress(getUserToken(), toISO(activeDate), updated, isFinished);
 
       if (isFinished) {
         const todayISO   = toISO(today());
@@ -299,8 +342,10 @@ export default function App() {
           } else if (data.lastCompleted && isYesterday(todayISO, data.lastCompleted)) {
             newStreak = data.streak + 1;
           }
-          saveStreak({ lastCompleted: todayISO, streak: newStreak });
+          const streakData = { lastCompleted: todayISO, streak: newStreak };
+          saveStreak(streakData);
           setStreak(newStreak);
+          pushStreak(getUserToken(), newStreak, todayISO);
         }
         setTimeout(() => setComplete(true), 500);
       }
@@ -389,7 +434,9 @@ export default function App() {
 
   // ── replay ────────────────────────────────────────────────────────────────────
   const handleReplay = () => {
-    clearProgress(toISO(activeDate));
+    const iso = toISO(activeDate);
+    clearProgress(iso);
+    pushPuzzleProgress(getUserToken(), iso, new Set(), false);
     setFoundWords(new Set());
     foundCellMap.current = new Map();
     setComplete(false);
