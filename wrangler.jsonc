@@ -16,7 +16,7 @@
 	],
 	"d1_databases": [
 		{
-			"binding": "searchwords_db",
+			"binding": "DB",
 			"database_name": "searchwords-db",
 			"database_id": "7ed0bcee-9159-413c-ae12-80053b26b8a8",
 			"remote": true

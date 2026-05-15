@@ -1,5 +1,3 @@
--- Run this in your Cloudflare D1 console or via wrangler d1 execute
-
 -- Users table (should already exist, included for reference)
 CREATE TABLE IF NOT EXISTS users (
   token          TEXT PRIMARY KEY,

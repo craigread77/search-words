@@ -174,6 +174,10 @@ export default function App() {
   const [toast,       setToast]       = useState({ msg: "", show: false });
   const [complete,    setComplete]    = useState(false);
   const [streak,      setStreak]      = useState(0);
+  const [showSettings, setShowSettings] = useState(false);
+  const [pairCode,     setPairCode]     = useState("");
+  const [pairStatus,   setPairStatus]   = useState(null); // null | "linking" | "success" | "error"
+  const [pairMessage,  setPairMessage]  = useState("");
 
   const toastTimer    = useRef(null);
   const wordCellCache = useRef([]);
@@ -194,21 +198,48 @@ export default function App() {
       const past = allDates.filter((d) => d <= todayISO).sort();
       setAvailableDates(past);
 
-      // ── 2. Streak — take whichever is higher: local or DB ──────────────────
+      // ── 2. Streak — validate expiry first, then take best valid value ─────────
+      const todayISO2 = todayISO; // same value, just aliased for clarity below
       const local = loadStreak();
+
+      // Helper: is a streak still alive? Only valid if lastCompleted is today or yesterday.
+      const isStreakAlive = (lastCompleted) => {
+        if (!lastCompleted) return false;
+        if (lastCompleted === todayISO2) return true;
+        const d = fromISO(lastCompleted);
+        d.setDate(d.getDate() + 1);
+        return toISO(d) === todayISO2; // was yesterday
+      };
+
       if (dbData?.success) {
-        const dbStreak   = dbData.streak        || 0;
-        const dbLast     = dbData.lastCompleted  || null;
-        const localStreak = local.streak         || 0;
+        const dbStreak    = dbData.streak       || 0;
+        const dbLast      = dbData.lastCompleted || null;
+        const localStreak = local.streak        || 0;
+        const localLast   = local.lastCompleted  || null;
+
+        const dbAlive    = isStreakAlive(dbLast);
+        const localAlive = isStreakAlive(localLast);
 
         let best;
-        if (dbStreak >= localStreak) {
+        if (!dbAlive && !localAlive) {
+          // Both expired — reset to 0 and write back to DB
+          best = { streak: 0, lastCompleted: null };
+          pushStreak(token, 0, null);
+        } else if (dbAlive && !localAlive) {
           best = { streak: dbStreak, lastCompleted: dbLast };
+        } else if (!dbAlive && localAlive) {
+          best = { streak: localStreak, lastCompleted: localLast };
+          pushStreak(token, localStreak, localLast);
         } else {
-          best = { streak: localStreak, lastCompleted: local.lastCompleted };
-          // write the higher local value back to DB
-          pushStreak(token, localStreak, local.lastCompleted);
+          // Both alive — take the higher streak
+          if (dbStreak >= localStreak) {
+            best = { streak: dbStreak, lastCompleted: dbLast };
+          } else {
+            best = { streak: localStreak, lastCompleted: localLast };
+            pushStreak(token, localStreak, localLast);
+          }
         }
+
         saveStreak(best);
         setStreak(best.streak);
 
@@ -442,6 +473,63 @@ export default function App() {
     setComplete(false);
   };
 
+  // ── device pairing ────────────────────────────────────────────────────────────
+  const handlePair = async () => {
+    const code = pairCode.trim().toLowerCase();
+    if (code.length < 8) {
+      setPairStatus("error");
+      setPairMessage("Code must be at least 8 characters.");
+      return;
+    }
+
+    setPairStatus("linking");
+    setPairMessage("");
+
+    try {
+      const res  = await fetch("/api/link", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ myToken: getUserToken(), theirCode: code }),
+      });
+      const data = await res.json();
+
+      if (!data.success) {
+        setPairStatus("error");
+        setPairMessage(data.error || "Something went wrong.");
+        return;
+      }
+
+      // Adopt the canonical token — overwrites our local token
+      localStorage.setItem(TOKEN_KEY, data.canonicalToken);
+
+      // Sync streak locally
+      const streakData = { streak: data.streak, lastCompleted: data.lastCompleted };
+      saveStreak(streakData);
+      setStreak(data.streak);
+
+      // Re-fetch all puzzle progress under the new token and merge into localStorage
+      const syncRes  = await fetch(`/api/streak?token=${data.canonicalToken}`);
+      const syncData = await syncRes.json();
+      if (syncData.success) {
+        const dbPuzzles = syncData.puzzles || {};
+        for (const [date, dbFound] of Object.entries(dbPuzzles)) {
+          const localProg  = loadProgress(date);
+          const localFound = localProg.found || [];
+          if (dbFound.length > localFound.length) {
+            saveProgress(date, new Set(dbFound), dbFound.complete ?? localProg.complete);
+          }
+        }
+      }
+
+      setPairStatus("success");
+      setPairMessage("Devices linked! Your progress has been merged.");
+      setPairCode("");
+    } catch {
+      setPairStatus("error");
+      setPairMessage("Network error — please try again.");
+    }
+  };
+
   // ── date nav — index-based, driven entirely by the manifest array ─────────────
   const activeISO  = toISO(activeDate);
   const currentIdx = availableDates ? availableDates.indexOf(activeISO) : -1;
@@ -522,8 +610,53 @@ export default function App() {
               </div>
             </div>
           )}
+
+          <button
+            className="settings-btn"
+            onClick={() => { setShowSettings((s) => !s); setPairStatus(null); setPairCode(""); }}
+            title="Sync devices"
+          >
+            <span className="settings-btn-icon">⚙</span>
+            <span className="settings-btn-label">Sync devices</span>
+          </button>
         </div>
       </header>
+
+      {/* ── Settings / pairing panel ── */}
+      {showSettings && (
+        <div className="settings-panel">
+          <div className="settings-section">
+            <div className="settings-label">Your device code</div>
+            <div className="settings-code">{getUserToken().slice(0, 8)}</div>
+            <div className="settings-hint">Share this code with another device to link your progress.</div>
+          </div>
+
+          <div className="settings-section">
+            <div className="settings-label">Link another device</div>
+            <div className="settings-row">
+              <input
+                className="settings-input"
+                type="text"
+                placeholder="Enter their 8-char code"
+                value={pairCode}
+                onChange={(e) => setPairCode(e.target.value.toLowerCase())}
+                maxLength={36}
+                spellCheck={false}
+                autoCapitalize="none"
+              />
+              <button
+                className="overlay-btn"
+                onClick={handlePair}
+                disabled={pairStatus === "linking"}
+              >
+                {pairStatus === "linking" ? "Linking…" : "Link"}
+              </button>
+            </div>
+            {pairStatus === "success" && <div className="settings-msg settings-msg--ok">{pairMessage}</div>}
+            {pairStatus === "error"   && <div className="settings-msg settings-msg--err">{pairMessage}</div>}
+          </div>
+        </div>
+      )}
 
       {/* ── Body ── */}
       {(loading || availableDates === null) && <div className="state-msg">Loading puzzle…</div>}

@@ -57,15 +57,18 @@ export async function onRequest(context) {
       return Response.json({ success: false, error: "Missing token" }, { status: 400 });
     }
 
+    // Always ensure the user row exists first (avoids FK issues on first visit)
+    await env.DB.prepare(`
+      INSERT INTO users (token, streak, last_completed)
+      VALUES (?, 0, NULL)
+      ON CONFLICT(token) DO NOTHING
+    `).bind(token).run();
+
     // Update streak if provided
     if (streak !== undefined && lastCompleted !== undefined) {
       await env.DB.prepare(`
-        INSERT INTO users (token, streak, last_completed)
-        VALUES (?, ?, ?)
-        ON CONFLICT(token) DO UPDATE SET
-          streak         = excluded.streak,
-          last_completed = excluded.last_completed
-      `).bind(token, streak, lastCompleted).run();
+        UPDATE users SET streak = ?, last_completed = ? WHERE token = ?
+      `).bind(streak, lastCompleted, token).run();
     }
 
     // Upsert puzzle progress if provided
